@@ -1,6 +1,6 @@
 // Bundle src/main.js (+three) into a single self-contained HTML that opens by double-click.
 import { build } from 'esbuild';
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'fs';
 import { buildBrainGraph } from './graph-build.mjs';
 await buildBrainGraph(); // V3.6: bake the vault's wiki-link graph into src/braingraph.js
 
@@ -14,7 +14,12 @@ const res = await build({
 });
 const js = res.outputFiles[0].text;
 const shell = readFileSync('src/shell.html', 'utf8');
-const html = shell.replace('<!--APP-->', () => `<script>${js}</script>`);
+// photo textures inlined as data URIs — file:// pages can't load file:// images,
+// so the double-click copy carries its own pixels
+const textures = Object.fromEntries(
+  ['textures', 'characters'].flatMap(dir => readdirSync('public/' + dir).filter(f => f.endsWith('.png') && f.startsWith('char-') || dir === 'textures')
+    .map(f => [f, 'data:image/png;base64,' + readFileSync('public/' + dir + '/' + f).toString('base64')])));
+const html = shell.replace('<!--APP-->', () => `<script>window.OFFICE_TEXTURES=${JSON.stringify(textures)}</script><script>${js}</script>`);
 mkdirSync('dist', { recursive: true });
 writeFileSync('dist/command-centre-v2.html', html);
 

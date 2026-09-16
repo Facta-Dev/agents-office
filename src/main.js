@@ -5,9 +5,11 @@ import { TOKENS, DEPTS, DEPT_KEYS, AGENTS, LAYOUT, WORKLINES, APPROVAL_ASKS, APP
 import { V1, FILE_GEN, STATS, KPIS, P, rnd, ri, person, money } from './v1data.js';
 import {
   PLINTH_H, mat, rbox, makePlinth, makeFloorTitle, makeDesk, makeChair,
-  makePerson, posePerson, poseWork, makePlant, makeServerRack, makeMeetingTable, makeWalkway, makeWarnSprite,
+  makePerson, posePerson, poseWork, makePlant, makeServerRack, makeMeetingTable, makeWalkway, makeWarnSprite, makeCharSprite,
+  setLow,
 } from './builders.js';
 import { initMcp } from './mcp.js';
+import { createFlatRenderer } from './flat.js';
 import { loadConnectors } from './connectors.js';
 import { initTasks } from './tasks.js';
 import { initBrain } from './brain.js';
@@ -15,10 +17,67 @@ let tasks = null; // V3 task boards — initialised after the rail constants exi
 
 /* ---------- renderer / scene / camera ---------- */
 const canvas = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.VSMShadowMap;
+// GPU probe: no WebGL or a software rasteriser (SwiftShader/llvmpipe) → low tier: no AA, no
+// shadows, Lambert instead of PBR (builders.QUALITY), and the fps watchdog drops pixel ratio
+// further if it still crawls. Antialias is fixed at construction, so this must run first.
+const gpu = (() => { try {
+  const gl = document.createElement('canvas').getContext('webgl2') || document.createElement('canvas').getContext('webgl');
+  if (!gl) return null;
+  const i = gl.getExtension('WEBGL_debug_renderer_info');
+  return i ? String(gl.getParameter(i.UNMASKED_RENDERER_WEBGL)) : '';
+} catch { return null; } })();
+const weakGPU = !gpu || /swiftshader|llvmpipe|software|mesa offscreen/i.test(gpu);
+if (weakGPU) console.info('office: weak or no GPU detected — low-detail render');
+setLow(weakGPU);
+let running = true; // the render loop re-arms itself only while this — a lost context pauses it
+let last = performance.now();
+const PR_STAGES = [Math.min(devicePixelRatio, 2), 1, 0.66]; // fps-watchdog steps; flat starts at 1
+let prStage = weakGPU ? 1 : 0;
+let renderer, flat = false;
+// no WebGL context at all → the same scene on a Canvas2D renderer (src/flat.js): the whole
+// graph builds on the CPU, only the paint is different. Same interactions, low detail.
+try {
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: !weakGPU, alpha: true });
+  renderer.setPixelRatio(weakGPU ? 1 : Math.min(devicePixelRatio, 2));
+  renderer.shadowMap.enabled = !weakGPU;
+  renderer.shadowMap.type = THREE.VSMShadowMap;
+  // when the GPU process crashes the context dies mid-frame — rendering on floods the console
+  // and can wedge the restore. Stop the loop; the browser hands back a fresh context and we
+  // resume. Two losses inside a minute mean the driver keeps crashing: give up the GPU and
+  // keep the office usable on the CPU renderer instead.
+  const losses = [];
+  canvas.addEventListener('webglcontextlost', e => {
+    e.preventDefault(); // tells the browser this tab wants a restore
+    running = false;
+    losses.push(Date.now());
+    if (losses.filter(t => Date.now() - t < 60000).length >= 2) goFlat();
+  });
+  canvas.addEventListener('webglcontextrestored', () => {
+    if (flat || !canvas.isConnected) return; // swapped to the CPU renderer — nothing to restore into
+    running = true;
+    fpsWin = 0; fpsN = 0; // fresh watchdog window
+    last = performance.now();
+    requestAnimationFrame(loop);
+  });
+} catch {
+  console.info('office: no WebGL context — CPU canvas renderer (low detail)');
+  renderer = createFlatRenderer(canvas);
+  renderer.setPixelRatio(1);
+  requestAnimationFrame(loop);  // the boot arm below skips itself on the flat path
+  flat = true;
+}
+function goFlat() {
+  if (flat) return;
+  flat = true;
+  renderer = createFlatRenderer(renderer.domElement); // a canvas that had GL can never be 2D
+  prStage = Math.max(prStage, 1); // CPU paint: never above pixel ratio 1
+  renderer.setPixelRatio(PR_STAGES[prStage]);
+  resize();
+  running = true;
+  last = performance.now();
+  requestAnimationFrame(loop);
+  console.info('office: GPU keeps crashing — switched to the CPU canvas renderer');
+}
 
 const scene = new THREE.Scene();
 
@@ -276,6 +335,16 @@ for (const k of ['emails', 'sales', 'marketing', 'ops', 'delivery']) {
   scene.add(p);
 }
 
+/* generated character greeters — one round-cropped portrait per pod (public/characters) */
+for (const k of ['emails', 'sales', 'marketing', 'ops', 'fin', 'delivery']) {
+  const L = LAYOUT[k];
+  const sx = Math.sign(L.pos[0]), sz = Math.sign(L.pos[1]);
+  const spr = makeCharSprite('assets/characters/char-' + k + '.png');
+  spr.position.set(L.pos[0] + sx * (L.w / 2 - 2.6), 1.9, L.pos[1] - sz * (L.d / 2 - 2.4)); // opposite corner from the plants
+  spr.userData.dept = k;
+  scene.add(spr);
+}
+
 /* ---------- focus dim: unfocused depts genuinely darken/desaturate in-scene ---------- */
 let focusDimTarget = 0, focusDim = 0;
 const dimSwapped = [];
@@ -450,7 +519,8 @@ addEventListener('wheel', (e) => {
 }, { passive: false });
 
 let drag = null;
-canvas.addEventListener('pointerdown', (e) => {
+addEventListener('pointerdown', (e) => {
+  if (e.target !== renderer.domElement) return; // the canvas element can be swapped for a CPU-renderer one
   drag = { x: e.clientX, y: e.clientY, moved: false };
 });
 addEventListener('pointermove', (e) => {
@@ -469,7 +539,7 @@ addEventListener('pointerup', (e) => {
   const wasDrag = drag && drag.moved;
   drag = null;
   if (wasDrag) return;
-  if (e.target !== canvas) return; // HTML chrome handles its own clicks
+  if (e.target !== renderer.domElement) return; // HTML chrome handles its own clicks
   const nx = (e.clientX / innerWidth) * 2 - 1, ny = -(e.clientY / innerHeight) * 2 + 1;
   ray.setFromCamera(new THREE.Vector2(nx, ny), camera);
   const mHits = ray.intersectObjects(mcp.sprites, false);
@@ -542,7 +612,8 @@ function setDark(on) {
 }
 
 // double-click empty space → straight back to overview
-canvas.addEventListener('dblclick', (e) => {
+addEventListener('dblclick', (e) => {
+  if (e.target !== renderer.domElement) return;
   const nx = (e.clientX / innerWidth) * 2 - 1, ny = -(e.clientY / innerHeight) * 2 + 1;
   ray.setFromCamera(new THREE.Vector2(nx, ny), camera);
   if (!ray.intersectObjects(clickTargets, false).length) zoomOut();
@@ -1370,6 +1441,7 @@ resize();
   if (h.get('appr')) requestApproval(h.get('appr') === '1' ? 'apay' : h.get('appr'));
   if (h.get('view') && LAYOUT[h.get('view')]) enterFocus(h.get('view'));
   if (h.get('cam')) setCam(h.get('cam') === '1');
+  if (h.get('flat') === '1') goFlat(); // force the CPU renderer even on a good GPU
   if (h.get('dark') === '1' || document.body.classList.contains('dark')) setDark(true);
   // typing #dark=1 into an OPEN tab is a same-document hash change (no reload) — react to it live
   addEventListener('hashchange', () => { const d = new URLSearchParams(location.hash.slice(1)).get('dark'); if (d === '1') setDark(true); else if (d === '0') setDark(false); });
@@ -1383,9 +1455,23 @@ window.CC = { flyTo, zoomToDept, zoomOut, zoomToApproval, requestApproval, openA
   setCam, setDark, brain, connectorReveal: () => mcp.startReveal(performance.now()),
   toggleBoard: () => tasks.toggle(), addTask: (agentId, title) => tasks.addTask(agentId, title), tasks, routines: () => tasks.routines };
 
-let last = performance.now();
+
+// fps watchdog: sustained <22 fps on a visible tab steps the pixel ratio down (one-way). Stage 1
+// is skipped when the GPU probe already chose low tier (it starts at pixel ratio 1).
+
+let fpsWin = 0, fpsN = 0;
 function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  fpsWin += dt; fpsN++;
+  if (document.hidden) { fpsWin = 0; fpsN = 0; } // rAF pauses while hidden — never judge a stale window
+  else if (fpsWin >= 3) {
+    if (fpsN / fpsWin < 22 && prStage < PR_STAGES.length - 1) {
+      prStage++;
+      renderer.setPixelRatio(PR_STAGES[prStage]);
+      console.info(`office: slow renderer — pixel ratio dropped to ${PR_STAGES[prStage]}`);
+    }
+    fpsWin = 0; fpsN = 0;
+  }
   tickTween(now);
   applyCamera();
   tickDim(dt);
@@ -1395,6 +1481,6 @@ function loop(now) {
   mcp.tick(now, dt, view, camera, focused, focusDim);
   syncOverviewBtn();
   renderer.render(scene, camera);
-  requestAnimationFrame(loop);
+  if (running) requestAnimationFrame(loop); // a lost context stops here until webglcontextrestored re-arms
 }
-requestAnimationFrame(loop);
+if (!flat) requestAnimationFrame(loop);

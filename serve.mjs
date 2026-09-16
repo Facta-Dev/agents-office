@@ -456,10 +456,16 @@ const server = http.createServer(async (req, res) => {
       const r = await chat(agent, String(text).trim(), history);
       return json(res, 200, { ...r, interview: false });
     }
+    if (req.method === 'GET' && url.pathname.startsWith('/assets/')) {
+      // generated images live in public/ (textures, characters); basename-only match kills traversal
+      const m = url.pathname.match(/^\/assets\/(textures|characters)\/([\w.-]+\.png)$/);
+      if (!m) return json(res, 404, { error: 'no such asset' });
+      try { res.setHeader('Content-Type', 'image/png'); return res.end(fs.readFileSync(path.join(ROOT, 'public', m[1], m[2]))); } catch { return json(res, 404, { error: 'no such asset' }); }
+    }
     json(res, 404, { error: 'not found' });
   } catch (e) { console.error(e); json(res, 500, { error: e.message }); }
 });
-server.listen(cfg.port, () => {
+server.listen(cfg.port, '127.0.0.1', () => {
   console.log(`Agents Office ${version} → http://localhost:${cfg.port}`);
   console.log(`  business: ${cfg.name}   brain: ${BRAIN} (${graph.notes} notes, ${graph.links.length} links)   claude: ${backend} · ${modelName(cfg.model)}${cfg.effort ? ' · effort ' + cfg.effort : ''} by default (routing on Sonnet)`);
   getUsage(true).then(u => console.log(u.source === 'claude' ? `  usage: session ${u.session?.percent ?? '—'}% · week ${u.week?.percent ?? '—'}% (your Claude plan, as Claude Code shows it)` : `  usage: Claude's gauge unavailable (${u.reason}) — showing the office's own count`)).catch(() => {});

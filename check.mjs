@@ -298,7 +298,7 @@ else {
       return 'hint says the schedule · SCHEDULED row + next-up strip + board column · RUN NOW fires · marketing refused · box grows + big editor mirrors';
     });
     await step('smoke: department focus opens the chat rail', async () => {
-      await page.keyboard.press('1'); await page.waitForTimeout(1800);
+      await page.keyboard.press('1'); await page.waitForTimeout(3600);
       const cls = await page.evaluate(() => document.getElementById('rail').className); if (!/agentOpen/.test(cls) || !/open/.test(cls)) throw new Error('rail: ' + cls);
       const strip = await page.evaluate(() => document.querySelector('#topconn').className); if (!/focus/.test(strip)) throw new Error('top strip not centred');
       await page.keyboard.press('Escape'); await page.waitForTimeout(1200);

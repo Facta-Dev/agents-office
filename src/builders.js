@@ -4,14 +4,59 @@ import * as THREE from 'three';
 export const PLINTH_H = 2.6;
 const WHITE = '#F7F7F2';
 
+// low tier: set by main.js's GPU probe before the scene is built — Lambert (no PBR cost) in place
+// of MeshStandardMaterial; emissive still works, metalness/roughness are ignored
+export let QUALITY = { low: false };
+export function setLow(v) { QUALITY.low = v; matCache.clear(); }
+
+// generated character greeter — round-cropped portrait (public/characters) as a billboard
+export function makeCharSprite(url) {
+  const src = (globalThis.OFFICE_TEXTURES && globalThis.OFFICE_TEXTURES[url.split('/').pop()]) || url;
+  const mat = new THREE.SpriteMaterial({ transparent: true });
+  texLoader.load(src, tex => { tex.colorSpace = THREE.SRGBColorSpace; mat.map = tex; mat.needsUpdate = true; });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.set(3.6, 3.6, 1);
+  return spr;
+}
+
+const texLoader = new THREE.TextureLoader();
+// photo-texture overlay: a plane that rides a hair above a slab, tinted by the
+// pastel dept colour. Loads async — the surface wears its plain colour until it lands.
+export function texSurface(url, w, d, tint, y) {
+  // build inlines textures as data URIs (file:// pages can't load file:// images)
+  const src = (globalThis.OFFICE_TEXTURES && globalThis.OFFICE_TEXTURES[url.split('/').pop()]) || url;
+  const mat = QUALITY.low
+    ? new THREE.MeshLambertMaterial({ color: tint })
+    : new THREE.MeshStandardMaterial({ color: tint, roughness: 0.92, metalness: 0.02 });
+  texLoader.load(src, tex => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(w / 1.8, d / 1.8);
+    tex.anisotropy = 8;
+    mat.map = tex;
+    mat.needsUpdate = true;
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, d), mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.y = y;
+  mesh.castShadow = false;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
 const matCache = new Map();
 export function mat(color, opts = {}) {
   const key = color + JSON.stringify(opts);
   if (!matCache.has(key)) {
-    matCache.set(key, new THREE.MeshStandardMaterial({
-      color, roughness: opts.rough ?? 0.85, metalness: opts.metal ?? 0.02,
-      ...(opts.emissive ? { emissive: opts.emissive, emissiveIntensity: opts.ei ?? 1 } : {}),
-    }));
+    matCache.set(key, QUALITY.low
+      ? new THREE.MeshLambertMaterial({
+          color,
+          ...(opts.emissive ? { emissive: opts.emissive, emissiveIntensity: opts.ei ?? 1 } : {}),
+        })
+      : new THREE.MeshStandardMaterial({
+          color, roughness: opts.rough ?? 0.85, metalness: opts.metal ?? 0.02,
+          ...(opts.emissive ? { emissive: opts.emissive, emissiveIntensity: opts.ei ?? 1 } : {}),
+        }));
   }
   return matCache.get(key);
 }
@@ -51,6 +96,7 @@ export function makePlinth(w, d, floorColor) {
   floor.position.y = 0;
   floor.castShadow = false;
   g.add(floor);
+  g.add(texSurface('assets/textures/carpet.png', w - 0.7, d - 0.7, floorColor, 0.065));
   return g;
 }
 
@@ -110,6 +156,7 @@ export function makeDeskScreenTexture(chip) {
 export function makeDesk(chip) {
   const g = new THREE.Group();
   const top = rbox(5.2, 2.6, 0.22, '#DCC29A', 0.18); top.position.y = 2.1; g.add(top);
+  g.add(texSurface('assets/textures/wood.png', 5.2, 2.6, '#ffffff', 2.215));
   const ped1 = rbox(0.9, 2.2, 1.9, WHITE, 0.12); ped1.position.set(-2.0, 0.1, 0); g.add(ped1);
   const ped2 = rbox(0.9, 2.2, 1.9, WHITE, 0.12); ped2.position.set(2.0, 0.1, 0); g.add(ped2);
   // monitor
